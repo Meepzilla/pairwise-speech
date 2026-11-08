@@ -1,39 +1,9 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-
-import {
-  generateMinimalPairTargets,
-  type MinimalPairOutput
-} from "@/ai/flows/generate-minimal-pairs";
-import {
-  generateMaximalPairTargets,
-  type GenerateMaximalPairTargetsOutput
-} from "@/ai/flows/generate-maximal-pairs";
-import {
-  generateMultipleOppositions,
-  type GenerateMultipleOppositionsOutput
-} from "@/ai/flows/generate-multiple-oppositions";
-import {
-  generateCyclesTargets,
-  type GenerateCyclesTargetsOutput,
-} from "@/ai/flows/generate-cycles-targets";
-import {
-  generateComplexityTargets,
-  type GenerateComplexityTargetsOutput
-} from "@/ai/flows/generate-complexity-targets";
-import {
-    calculateSonorityDifference,
-    type CalculateSonorityDifferenceOutput
-} from "@/ai/flows/calculate-sonority-difference";
-import {
-    transcribeToIpa
-} from "@/ai/flows/transcribe-to-ipa";
-
 
 import { Button } from "@/components/ui/button";
 import {
@@ -67,14 +37,8 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useToast } from "@/hooks/use-toast";
-import { BrainCircuit, Copy, Save, Plus, Minus, Info } from "lucide-react";
+import { BrainCircuit } from "lucide-react";
 import { PhonemeSelector } from "./phoneme-selector";
-import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
-import { Badge } from "./ui/badge";
-import { Switch } from "./ui/switch";
-import { Label } from "./ui/label";
 
 const phonologicalErrors = [
     { value: "Final Consonant Deletion", label: "Final Consonant Deletion (e.g., 'ca' for 'cat')" },
@@ -192,26 +156,8 @@ const formSchema = z.object({
 
 
 type FormValues = z.infer<typeof formSchema>;
-type ResultType = "minimal" | "maximal" | "multiple" | "cycles" | "complexity" | null;
-type ResultData = MinimalPairOutput | GenerateMaximalPairTargetsOutput | GenerateMultipleOppositionsOutput | GenerateCyclesTargetsOutput | GenerateComplexityTargetsOutput;
-
-type ResultItem = {
-    text: string;
-    rationale: string;
-    sonority?: CalculateSonorityDifferenceOutput;
-    ipa?: string;
-}
 
 export function SpeechTool() {
-  const [isLoading, setIsLoading] = useState(false);
-  const [result, setResult] = useState<ResultData | null>(null);
-  const [resultType, setResultType] = useState<ResultType>(null);
-  const [resultItems, setResultItems] = useState<ResultItem[]>([]);
-  const [trialCounts, setTrialCounts] = useState<{ [key: string]: number }>({});
-  const [showIpa, setShowIpa] = useState(false);
-  const [ipaCache, setIpaCache] = useState<Record<string, string>>({});
-  const { toast } = useToast();
-
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -230,242 +176,6 @@ export function SpeechTool() {
   const selectedErrorType = form.watch("phonologicalError");
   const selectedGenerationType = form.watch("generationType");
 
-  const initializeTrialCounts = (targets: ResultItem[]) => {
-    const initialCounts = targets.reduce((acc, target) => {
-        acc[target.text] = 0;
-        return acc;
-    }, {} as { [key: string]: number });
-    setTrialCounts(initialCounts);
-  };
-
-  const handleTrialCountChange = (target: string, delta: number) => {
-    setTrialCounts(prevCounts => ({
-        ...prevCounts,
-        [target]: Math.max(0, (prevCounts[target] || 0) + delta)
-    }));
-  };
-
-  const getRawResultItems = (data: ResultData, type: ResultType): Omit<ResultItem, 'sonority'>[] => {
-    if (!data) return [];
-    
-    switch (type) {
-        case "minimal":
-            return (data as MinimalPairOutput).minimalPairTargets.map(t => ({ text: t.pair, rationale: t.rationale }));
-        case "maximal":
-            return (data as GenerateMaximalPairTargetsOutput).maximalPairs.map(t => ({ text: t.pair, rationale: t.rationale }));
-        case "multiple":
-            return (data as GenerateMultipleOppositionsOutput).multipleOppositions.map(t => ({ text: t.set, rationale: t.rationale }));
-        case "cycles":
-            return (data as GenerateCyclesTargetsOutput).targetWords.map(t => ({ text: t.word, rationale: t.rationale }));
-        case "complexity":
-            return (data as GenerateComplexityTargetsOutput).complexityPairs.map(t => ({ text: t.pair, rationale: t.rationale }));
-        default:
-            return [];
-    }
-  };
-
-  const getIpaForText = async (text: string) => {
-    if (ipaCache[text]) {
-        return ipaCache[text];
-    }
-    const words = text.split(/ - | /).map(w => w.trim().replace(/[^a-zA-Z]/g, ''));
-    const ipaPromises = words.map(word => transcribeToIpa(word));
-    try {
-      const ipaResults = await Promise.all(ipaPromises);
-      const ipaString = text.split(' - ').map((_, i) => ipaResults[i] || words[i]).join(' - ');
-      setIpaCache(prev => ({...prev, [text]: ipaString}));
-      return ipaString;
-    } catch(e) {
-      console.error("Could not transcribe", text, e);
-      return text;
-    }
-  };
-
-
-  const processResults = async (data: ResultData, type: ResultType) => {
-    const rawItems = getRawResultItems(data, type);
-    initializeTrialCounts(rawItems);
-    
-    const itemsWithDetails = await Promise.all(
-        rawItems.map(async (item) => {
-            const newItem: ResultItem = {...item};
-            if (type !== 'cycles' && type !== 'multiple' && item.text.includes('-')) {
-                const [word1, word2] = item.text.split('-').map(w => w.trim());
-                try {
-                    newItem.sonority = await calculateSonorityDifference({ word1, word2 });
-                } catch (e) {
-                    console.error("Could not calculate sonority for", item.text, e);
-                }
-            }
-            try {
-                newItem.ipa = await getIpaForText(item.text);
-            } catch (e) {
-                console.error("Could not get IPA for", item.text, e);
-            }
-            return newItem;
-        })
-    );
-    setResultItems(itemsWithDetails);
-  }
-
-  const onSubmit = async (data: FormValues) => {
-    setIsLoading(true);
-    setResult(null);
-    setResultItems([]);
-    const currentGenerationType = data.generationType;
-    setResultType(currentGenerationType);
-    setTrialCounts({});
-    setShowIpa(false);
-
-    const submissionData: any = {
-        phonologicalError: data.phonologicalError,
-        stimulableSounds: data.stimulableSounds,
-        phoneticInventory: data.phoneticInventory,
-        syllableLength: data.syllableLength === 'any' ? undefined : data.syllableLength,
-        phonemePosition: data.phonemePosition === 'any' ? undefined : data.phonemePosition,
-    };
-
-    if (data.phonologicalError === 'custom' && data.targetPhoneme && data.errorPhoneme) {
-        submissionData.phonologicalError = `Substitution of ${data.errorPhoneme} for ${data.targetPhoneme}`;
-    }
-
-    if (currentGenerationType === 'cycles') {
-        submissionData.cycleStage = data.cycleStage;
-    }
-
-    try {
-      let response: ResultData | null = null;
-      if (currentGenerationType === "minimal") {
-        response = await generateMinimalPairTargets(submissionData);
-      } else if (currentGenerationType === "maximal") {
-        response = await generateMaximalPairTargets(submissionData);
-      } else if (currentGenerationType === "multiple") {
-        response = await generateMultipleOppositions(submissionData);
-      } else if (currentGenerationType === "cycles") {
-        response = await generateCyclesTargets(submissionData);
-      } else if (currentGenerationType === "complexity") {
-        response = await generateComplexityTargets(submissionData);
-      }
-      setResult(response);
-      if (response) {
-        await processResults(response, currentGenerationType);
-      }
-    } catch (error) {
-      console.error("Error generating targets:", error);
-      toast({
-        variant: "destructive",
-        title: "Generation Failed",
-        description:
-          "There was an error generating the targets. Please try again.",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const copyToClipboard = () => {
-    let textToCopy = "";
-    if (resultType === 'cycles' && result) {
-        const cyclesResult = result as GenerateCyclesTargetsOutput;
-        const wordsText = (resultItems).map(w => `${w.text} ${showIpa && w.ipa ? `(${w.ipa})` : ''} - Rationale: ${w.rationale}`).join("\n");
-        textToCopy = `Cycles Approach Target List\n\nTarget Pattern: ${cyclesResult.primaryProcess}\nTarget Phoneme/Structure: ${cyclesResult.targetPhoneme}\n\nTarget Words:\n${wordsText}`;
-    } else {
-        textToCopy = resultItems.map(item => `${item.text} ${showIpa && item.ipa ? `(${item.ipa})` : ''} - Rationale: ${item.rationale}`).join("\n");
-    }
-    navigator.clipboard.writeText(textToCopy);
-    toast({
-      title: "Copied to Clipboard",
-      description: "The target list has been copied.",
-    });
-  }
-
-  const getResultTitle = () => {
-    if (!resultType) return "Generated Targets";
-    switch (resultType) {
-      case "minimal":
-        return "Minimal Pair Targets";
-      case "maximal":
-        return "Maximal Pair Targets";
-      case "multiple":
-        return "Multiple Opposition Sets";
-      case "cycles":
-        return "Cycles Approach Targets";
-      case "complexity":
-        return "Complexity Approach Targets";
-      default:
-        return "Generated Targets";
-    }
-  };
-
-  const getResultDescription = () => {
-    if (isLoading || !result) return "Your generated targets will appear here.";
-    if (resultItems.length > 0) {
-        const resultTypeName = resultType === 'multiple' ? 'opposition sets' : resultType === 'cycles' ? 'words' : 'pairs';
-        return `Generated ${resultItems.length} ${resultTypeName}.`;
-    }
-    return "Your generated targets will appear here.";
-}
-
-const renderResultItem = (item: ResultItem, index: number) => (
-    <div key={index} className="flex flex-col gap-2 p-3 bg-secondary rounded-lg">
-        <div className="flex items-start justify-between">
-            <div className="flex-grow space-y-1">
-                <div className="text-center font-medium text-secondary-foreground text-lg">
-                    {showIpa ? (item.ipa || item.text) : item.text}
-                </div>
-                {item.sonority && item.sonority.difference !== null && (
-                    <div className="text-center">
-                        <Popover>
-                            <PopoverTrigger asChild>
-                                <Badge variant="outline" className="cursor-help">
-                                    Sonority Diff: {item.sonority.difference}
-                                </Badge>
-                            </PopoverTrigger>
-                            <PopoverContent className="w-80">
-                                <div className="grid gap-4">
-                                    <div className="space-y-2">
-                                        <h4 className="font-medium leading-none">Sonority Calculation</h4>
-                                        <p className="text-sm text-muted-foreground">
-                                            {item.sonority.rationale}
-                                        </p>
-                                    </div>
-                                </div>
-                            </PopoverContent>
-                        </Popover>
-                    </div>
-                )}
-            </div>
-            <Popover>
-                <PopoverTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-6 w-6 ml-2 flex-shrink-0">
-                        <Info className="h-4 w-4" />
-                    </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-80">
-                    <div className="grid gap-4">
-                        <div className="space-y-2">
-                            <h4 className="font-medium leading-none">Rationale</h4>
-                            <p className="text-sm text-muted-foreground">
-                                {item.rationale}
-                            </p>
-                        </div>
-                    </div>
-                </PopoverContent>
-            </Popover>
-        </div>
-      <div className="flex items-center justify-center gap-2">
-        <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => handleTrialCountChange(item.text, -1)}>
-          <Minus className="h-4 w-4" />
-        </Button>
-        <span className="text-sm font-semibold w-8 text-center">{trialCounts[item.text] || 0}</span>
-        <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => handleTrialCountChange(item.text, 1)}>
-          <Plus className="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
-  );
-
-
   return (
     <div className="grid gap-8 lg:grid-cols-3">
       <div className="lg:col-span-1">
@@ -479,7 +189,7 @@ const renderResultItem = (item: ResultItem, index: number) => (
           <CardContent>
             <Form {...form}>
               <form
-                onSubmit={form.handleSubmit(onSubmit)}
+                onSubmit={(e) => e.preventDefault()}
                 className="space-y-6"
               >
                 <FormField
@@ -764,16 +474,13 @@ const renderResultItem = (item: ResultItem, index: number) => (
                 </Accordion>
 
 
-                <Button type="submit" disabled={isLoading || !form.formState.isValid} className="w-full">
-                  {isLoading ? (
-                    "Generating..."
-                  ) : (
-                    <>
-                      <BrainCircuit className="mr-2 h-4 w-4" />
-                      Generate Targets
-                    </>
-                  )}
+                <Button type="submit" disabled className="w-full">
+                  <BrainCircuit className="mr-2 h-4 w-4" />
+                  Generate Targets
                 </Button>
+                <p className="text-sm text-muted-foreground">
+                  Target generation is turned off. The generator has been removed, so this form no longer creates target lists.
+                </p>
               </form>
             </Form>
           </CardContent>
@@ -782,76 +489,22 @@ const renderResultItem = (item: ResultItem, index: number) => (
 
       <div className="lg:col-span-2">
         <Card className="min-h-[400px]">
-          <CardHeader className="flex flex-row items-center justify-between">
-            <div className="flex-grow">
-              <CardTitle>{getResultTitle()}</CardTitle>
-              <CardDescription>
-                {getResultDescription()}
-              </CardDescription>
-            </div>
-            {result && (
-                <div className="flex items-center gap-4">
-                    <div className="flex items-center space-x-2">
-                        <Switch id="ipa-mode" checked={showIpa} onCheckedChange={setShowIpa} />
-                        <Label htmlFor="ipa-mode">Show IPA</Label>
-                    </div>
-                    <div className="flex gap-2">
-                        <Button variant="outline" size="sm" onClick={copyToClipboard}>
-                            <Copy className="mr-2 h-4 w-4"/>
-                            Copy
-                        </Button>
-                        <Button variant="default" size="sm" disabled>
-                            <Save className="mr-2 h-4 w-4"/>
-                            Save List
-                        </Button>
-                    </div>
-                </div>
-            )}
+          <CardHeader>
+            <CardTitle>Generated Targets</CardTitle>
+            <CardDescription>
+              Target generation is turned off.
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            {isLoading && (
-              <div className="space-y-4">
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
+            <div className="flex flex-col items-center justify-center h-full min-h-[400px] p-8 text-center bg-secondary/50 border-2 border-dashed rounded-lg">
+              <div className="flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mb-4">
+                <BrainCircuit className="w-8 h-8 text-primary" />
               </div>
-            )}
-            {!isLoading && result && resultType !== 'cycles' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {resultItems.map(renderResultItem)}
-              </div>
-            )}
-            {!isLoading && resultType === 'cycles' && result && (
-              <div className="space-y-6">
-                  <div>
-                      <h4 className="font-semibold text-lg">Target Pattern</h4>
-                      <p className="text-muted-foreground">{(result as GenerateCyclesTargetsOutput).primaryProcess}</p>
-                  </div>
-                  <div>
-                      <h4 className="font-semibold text-lg">Target Phoneme/Structure</h4>
-                      <p className="text-muted-foreground">{(result as GenerateCyclesTargetsOutput).targetPhoneme}</p>
-                  </div>
-                  <div>
-                      <h4 className="font-semibold text-lg">Target Words</h4>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                          {resultItems.map(renderResultItem)}
-                      </div>
-                  </div>
-              </div>
-            )}
-            {!isLoading && !result && (
-              <div className="flex flex-col items-center justify-center h-full min-h-[400px] p-8 text-center bg-secondary/50 border-2 border-dashed rounded-lg">
-                <div className="flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mb-4">
-                    <BrainCircuit className="w-8 h-8 text-primary" />
-                </div>
-                <h3 className="text-xl font-semibold">Your Targets Await</h3>
-                <p className="mt-2 text-muted-foreground">
-                  Select your options on the left and click "Generate Targets" to begin.
-                </p>
-              </div>
-            )}
+              <h3 className="text-xl font-semibold">Target Generation Is Turned Off</h3>
+              <p className="mt-2 text-muted-foreground">
+                The target generator has been removed. The form on the left still holds your selections, but no target list will be generated.
+              </p>
+            </div>
           </CardContent>
         </Card>
       </div>
