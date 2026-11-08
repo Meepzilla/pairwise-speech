@@ -1,4 +1,5 @@
 import type {NextConfig} from 'next';
+import {initOpenNextCloudflareForDev} from '@opennextjs/cloudflare';
 
 const allowedDevOrigins: string[] = [];
 // In a development environment like Firebase Studio, the preview may be served from a different origin.
@@ -27,5 +28,7 @@ const nextConfig: NextConfig = {
     ],
   },
 };
+
+initOpenNextCloudflareForDev();
 
 export default nextConfig;
